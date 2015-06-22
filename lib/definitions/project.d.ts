@@ -31,4 +31,6 @@ interface IPlatformProjectService {
 	addLibrary(platformData: IPlatformData, libraryPath: string): IFuture<void>;
 	canUpdatePlatform(currentVersion: string, newVersion: string): IFuture<boolean>;
 	updatePlatform(currentVersion: string, newVersion: string): IFuture<void>;
+	preparePluginNativeCode(pluginData: IPluginData): IFuture<void>;
+	removePluginNativeCode(pluginData: IPluginData): IFuture<void>;
 }

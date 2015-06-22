@@ -226,6 +226,16 @@ class IOSProjectService implements  IPlatformProjectService {
 			this.replaceFileContent(pbxprojFilePath).wait();
 		}).future<void>()();
 	}
+	
+	public preparePluginNativeCode(pluginData: IPluginData): IFuture<void> {
+		return (() => {
+		}).future<void>()();
+	}
+	
+	public removePluginNativeCode(pluginData: IPluginData): IFuture<void> {
+		return (() => {
+		}).future<void>()();
+	}
 
 	private buildPathToXcodeProjectFile(version: string): string {
 		return path.join(this.$npmInstallationManager.getCachedPackagePath(this.platformData.frameworkPackageName, version), constants.PROJECT_FRAMEWORK_FOLDER_NAME, util.format("%s.xcodeproj", IOSProjectService.IOS_PROJECT_NAME_PLACEHOLDER), "project.pbxproj");

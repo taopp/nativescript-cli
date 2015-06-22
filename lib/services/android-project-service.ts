@@ -9,6 +9,8 @@ import helpers = require("../common/helpers");
 import fs = require("fs");
 import os = require("os");
 
+import androidProjectPropertiesManagerLib = require("./android-project-properties-manager");
+
 class AndroidProjectService implements IPlatformProjectService {
 	private static MIN_SUPPORTED_VERSION = 17;
 	private SUPPORTED_TARGETS = ["android-17", "android-18", "android-19", "android-21", "android-22"]; // forbidden for now: "android-MNC"
@@ -21,6 +23,7 @@ class AndroidProjectService implements IPlatformProjectService {
 	
 
 	private targetApi: string;
+	private _androidProjectPropertiesManagers: IDictionary<IAndroidProjectPropertiesManager>;
 
 	constructor(private $androidEmulatorServices: Mobile.IEmulatorPlatformServices,
 		private $childProcess: IChildProcess,
@@ -30,7 +33,9 @@ class AndroidProjectService implements IPlatformProjectService {
 		private $projectData: IProjectData,
 		private $propertiesParser: IPropertiesParser,
 		private $options: IOptions,
-		private $hostInfo: IHostInfo) {
+		private $hostInfo: IHostInfo,
+		private $injector: IInjector) {
+			this._androidProjectPropertiesManagers = Object.create(null);
 	}
 
 	private _platformData: IPlatformData = null;
@@ -185,72 +190,44 @@ class AndroidProjectService implements IPlatformProjectService {
 		return this.$fs.exists(path.join(projectRoot, "assets", constants.APP_FOLDER_NAME));
 	}
 	
-	private parseProjectProperties(projDir: string, destDir: string): IFuture<void> {
+	private getProjectPropertiesManager(filePath: string): IAndroidProjectPropertiesManager {
+		if(!this._androidProjectPropertiesManagers[filePath]) {
+			this._androidProjectPropertiesManagers[filePath] = this.$injector.resolve(androidProjectPropertiesManagerLib.AndroidProjectPropertiesManager, { directoryPath: filePath });
+		}
+		
+		return this._androidProjectPropertiesManagers[filePath];
+	}
+	
+	private parseProjectProperties(projDir: string, destDir: string): IFuture<void> { // projDir is libraryPath, targetPath is the path to lib folder
 		return (() => {
 			let projProp = path.join(projDir, "project.properties");
-	
 			if (!this.$fs.exists(projProp).wait()) {
 				this.$logger.warn("Warning: File %s does not exist", projProp);
 				return;
 			}
-	
-			let lines = this.$fs.readText(projProp, "utf-8").wait().split(os.EOL);
-	
-			let regEx = /android\.library\.reference\.(\d+)=(.*)/;
-			lines.forEach(elem => {
-				let match = elem.match(regEx);
-				if (match) {
-					let libRef: ILibRef = { idx: parseInt(match[1]), path: match[2].trim() };
-					libRef.adjustedPath = this.$fs.isRelativePath(libRef.path) ? path.join(projDir, libRef.path) : libRef.path;
-					this.parseProjectProperties(libRef.adjustedPath, destDir).wait();
-				}
+			
+			let projectPropertiesManager = this.getProjectPropertiesManager(projDir);
+			let references = projectPropertiesManager.getProjectReferences().wait();
+			_.each(references, reference => {
+				let adjustedPath = this.$fs.isRelativePath(reference.path) ? path.join(projDir, reference.path) : reference.path;
+				this.parseProjectProperties(adjustedPath, destDir).wait();
 			});
 	
 			this.$logger.info("Copying %s", projDir);
 			shell.cp("-Rf", projDir, destDir);
 	
 			let targetDir = path.join(destDir, path.basename(projDir));
-			// TODO: parametrize targetSdk
-			let targetSdk = "android-17";
+			let targetSdk = `android-${this.$options.sdk || 17}`;
 			this.$logger.info("Generate build.xml for %s", targetDir);
 			this.runAndroidUpdate(targetDir, targetSdk).wait();
 		}).future<void>()();
 	}
 
-	private getProjectReferences(projDir: string): ILibRef[]{
-		let projProp = path.join(projDir, "project.properties");
-
-		let lines = this.$fs.readText(projProp, "utf-8").wait().split(os.EOL);
-
-		let refs: ILibRef[] = [];
-
-		let regEx = /android\.library\.reference\.(\d+)=(.*)/;
-		lines.forEach(elem => {
-			let match = elem.match(regEx);
-			if (match) {
-				let libRef: ILibRef = { idx: parseInt(match[1]), path: match[2] };
-				libRef.adjustedPath = path.join(projDir, libRef.path);
-				libRef.key = match[0].split("=")[0];
-				refs.push(libRef);
-			}
-		});
-
-		return refs;
-	}
-
-	private updateProjectReferences(projDir: string, libraryPath: string): void {
-		let refs = this.getProjectReferences(projDir);
-		let maxIdx = refs.length > 0 ? _.max(refs, r => r.idx).idx : 0;
-
-		let relLibDir = path.relative(projDir, libraryPath).split("\\").join("/");
-
-		let libRefExists = _.any(refs, r => path.normalize(r.path) === path.normalize(relLibDir));
-
-		if (!libRefExists) {
-			let projRef = util.format("%sandroid.library.reference.%d=%s", os.EOL, maxIdx + 1, relLibDir);
-			let projProp = path.join(projDir, "project.properties");
-			fs.appendFileSync(projProp, projRef, { encoding: "utf-8" });
-		}
+	private updateProjectReferences(projDir: string, libraryPath: string): IFuture<void> {
+		let relLibDir = path.relative(projDir, libraryPath).split("\\").join("/");		
+		
+		let projectPropertiesManager = this.getProjectPropertiesManager(projDir);		
+		return projectPropertiesManager.addProjectReference(relLibDir);
 	}
 
 	public addLibrary(platformData: IPlatformData, libraryPath: string): IFuture<void> {
@@ -271,7 +248,7 @@ class AndroidProjectService implements IPlatformProjectService {
 
 			let libProjProp = path.join(libraryPath, "project.properties");
 			if (this.$fs.exists(libProjProp).wait()) {
-				this.updateProjectReferences(platformData.projectRoot, targetLibPath);
+				this.updateProjectReferences(platformData.projectRoot, targetLibPath).wait();
 			}
 		}).future<void>()();
 	}
@@ -302,25 +279,14 @@ class AndroidProjectService implements IPlatformProjectService {
 	
 	public removePluginNativeCode(pluginData: IPluginData): IFuture<void> {
 		return (() => {
-			let projectReferences = this.getProjectReferences(this.platformData.projectRoot);
-			let androidLibraries = this.getAllAndroidLibrariesForPlugin(pluginData).wait();
+			let projectPropertiesManager = this.getProjectPropertiesManager(this.platformData.projectRoot);			
 			
-			let file = path.join(this.platformData.projectRoot, "project.properties");
-			let editor = this.$propertiesParser.createEditor(file).wait();
-			
+			let androidLibraries = this.getAllAndroidLibrariesForPlugin(pluginData).wait();			
 			_.each(androidLibraries, androidLibraryName => {
-				// Remove library from project.properties		
-				let androidLibraryNameLowerCase = androidLibraryName.toLowerCase();
-				let projectReference = _.find(projectReferences, projectReference => _.last(projectReference.adjustedPath.split(path.sep)).toLowerCase() === androidLibraryNameLowerCase);
-				if(projectReference && projectReference.key) {
-					editor.unset(projectReference.key);
-				}
-				
-				// Remove library from lib folder
-				this.$fs.deleteDirectory(path.join(this.$projectData.projectDir, "lib", this.platformData.normalizedPlatformName, androidLibraryName)).wait();
+				let libPath = path.join(this.$projectData.projectDir, "lib", this.platformData.normalizedPlatformName, androidLibraryName);
+				projectPropertiesManager.removeProjectReference(path.relative(this.platformData.projectRoot, libPath)).wait(); // TODO: Compose the reference path
+				this.$fs.deleteDirectory(libPath).wait();
 			});
-			
-			this.$propertiesParser.saveEditor().wait();
 			
 		}).future<void>()();
 	}

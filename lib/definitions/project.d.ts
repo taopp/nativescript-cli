@@ -34,3 +34,9 @@ interface IPlatformProjectService {
 	preparePluginNativeCode(pluginData: IPluginData): IFuture<void>;
 	removePluginNativeCode(pluginData: IPluginData): IFuture<void>;
 }
+
+interface IAndroidProjectPropertiesManager {
+	getProjectReferences(): IFuture<ILibRef[]>;
+	addProjectReference(referencePath: string): IFuture<void>;
+	removeProjectReference(referencePath: string): IFuture<void>;	
+}
